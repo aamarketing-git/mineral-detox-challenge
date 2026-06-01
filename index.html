@@ -357,6 +357,28 @@
         return result.data;
       },
 
+      // 회차 기록을 (user_id + round_number) 기준으로 갱신.
+      // 로컬 id와 서버 row id가 어긋나 있어도 "모두가 보는 그 행"을 정확히 수정한다.
+      // 같은 회차가 중복으로 여러 행이면 전부 동일하게 맞춰진다.
+      async updateRunByUserRound(userId, roundNumber, patch) {
+        if (!sb) return { ok: false, count: 0 };
+        const payload = {};
+        if (patch.weight_before !== undefined) payload.weight_before = patch.weight_before;
+        if (patch.weight_after !== undefined)  payload.weight_after = patch.weight_after;
+        if (patch.body_fat_before !== undefined) payload.body_fat_before = patch.body_fat_before;
+        if (patch.body_fat_after !== undefined)  payload.body_fat_after = patch.body_fat_after;
+        if (patch.conditions_before !== undefined) payload.conditions_before = patch.conditions_before;
+        if (patch.conditions_after !== undefined)  payload.conditions_after = patch.conditions_after;
+        if (patch.review !== undefined) payload.review = patch.review;
+        const result = await tryWithFallback(
+          (p) => sb.from('runs').update(p)
+            .eq('user_id', userId).eq('round_number', roundNumber).select(),
+          payload
+        );
+        if (result.error) { this._setError('updateRunByUserRound', result.error); return { ok: false, count: 0 }; }
+        return { ok: true, count: (result.data || []).length };
+      },
+
       // 회차 기록 삭제
       async deleteRun(runId) {
         if (!sb) return false;
@@ -594,6 +616,20 @@
       { key: 'focus',     label: '집중력',          Icon: Target },
       { key: 'skin',      label: '피부상태',        Icon: Sun },
     ];
+
+    /* 로컬 entry → 서버(runs) 컬럼 payload 변환 + 비교 헬퍼 */
+    const entryToRunPayload = (e) => ({
+      weight_before: e.weight?.before ?? null,
+      weight_after:  e.weight?.after  ?? null,
+      body_fat_before: e.bodyFat?.before ?? null,
+      body_fat_after:  e.bodyFat?.after  ?? null,
+      conditions_before: CONDITION_DEFS.reduce((a, d) => { a[d.key] = e.conditions?.[d.key]?.before ?? null; return a; }, {}),
+      conditions_after:  CONDITION_DEFS.reduce((a, d) => { a[d.key] = e.conditions?.[d.key]?.after  ?? null; return a; }, {}),
+      review: e.review ?? null,
+    });
+    // 편집 가능한 필드만 비교 (completedAt 등은 제외)
+    const sameRunData = (a, b) =>
+      JSON.stringify(entryToRunPayload(a)) === JSON.stringify(entryToRunPayload(b));
 
     /* ========== Relative time formatter ========== */
     const formatRelative = (ts) => {
@@ -2787,13 +2823,12 @@
               conditions_after:  conditionsAfter,
               review: patched.review,
             };
-            const isRealId = entry.id && !entry.id.startsWith('run-');
-            if (isRealId) {
-              // 이미 서버에 있는 기록 → update (모든 사용자에게 반영됨)
-              const updated = await db.updateRun(entry.id, runPayload);
-              if (!updated) { setMsg('서버 저장 실패'); setSaving(false); return; }
-            } else {
-              // 아직 서버에 없던 로컬 기록 → 새로 저장하며 실제 UUID 확보
+            // 회차 번호 기준으로 "모두가 보는 그 행"을 직접 갱신.
+            //   → 로컬 id와 서버 id가 어긋나 있어도 확실히 반영된다.
+            const res = await db.updateRunByUserRound(user.supabaseId, entry.roundNumber, runPayload);
+            if (!res.ok) { setMsg('서버 저장 실패'); setSaving(false); return; }
+            if (res.count === 0) {
+              // 서버에 해당 회차가 아예 없으면 새로 저장
               const savedRow = await db.insertRun(user.supabaseId, user, {
                 roundNumber: entry.roundNumber,
                 weight: patched.weight,
@@ -3101,15 +3136,15 @@
         } catch (e) {}
       }, [user, before, after, checks, history]);
 
-      // 앱 시작 시 Supabase에서 본인 기록 동기화 (이름+전화번호 있을 때만)
+      // 앱 시작 시 Supabase 동기화 + 로컬에만 있던 수정사항을 서버로 반영(reconcile)
       React.useEffect(() => {
         if (!db.ready) return;
         if (!user.name || !user.phone) return;
+        const localAtMount = history; // 첫 렌더 시점의 로컬 기록 (이전 수정 포함)
         (async () => {
           const { user: u, runs } = await db.fetchByCredentials(user.name, user.phone);
           if (!u) return;
-          const entries = runs.map(r => runRowToEntry(r, u));
-          setHistory(entries);
+
           setUser(prev => ({
             ...prev,
             supabaseId: u.id,
@@ -3119,6 +3154,41 @@
             birthYear: u.birth_year ? String(u.birth_year) : prev.birthYear,
             nickname: u.nickname || prev.nickname,
           }));
+
+          const serverEntries = runs.map(r => runRowToEntry(r, u));
+          const serverByRound = new Map(serverEntries.map(e => [e.roundNumber, e]));
+
+          // ★ 코드 변경 전에 로컬에서만 수정돼 서버에 반영 안 된 기록을 찾아 서버로 밀어올린다.
+          //   → 이래야 그 수정이 다른 모든 사용자에게도 보인다.
+          let pushed = false;
+          for (const local of localAtMount) {
+            if (local.roundNumber == null) continue;
+            const server = serverByRound.get(local.roundNumber);
+            if (server) {
+              if (!sameRunData(local, server)) {
+                await db.updateRunByUserRound(u.id, local.roundNumber, entryToRunPayload(local));
+                pushed = true;
+              }
+            } else {
+              // 서버에 아예 없던 로컬 기록 → 새로 저장
+              await db.insertRun(u.id, user, {
+                roundNumber: local.roundNumber,
+                weight: local.weight,
+                bodyFat: local.bodyFat,
+                conditionsBefore: CONDITION_DEFS.reduce((a, d) => { a[d.key] = local.conditions?.[d.key]?.before; return a; }, {}),
+                conditionsAfter:  CONDITION_DEFS.reduce((a, d) => { a[d.key] = local.conditions?.[d.key]?.after;  return a; }, {}),
+                review: local.review,
+              });
+              pushed = true;
+            }
+          }
+
+          // 반영 후 서버에서 다시 읽어 정합화 (실제 UUID 확보)
+          const fresh = pushed
+            ? ((await db.fetchByCredentials(user.name, user.phone)).runs || [])
+            : runs;
+          setHistory(fresh.map(r => runRowToEntry(r, u)));
+          if (pushed) refreshRemoteCompleted();
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
@@ -3131,8 +3201,10 @@
 
       // Merge: 본인 history(로컬) + 다른 사람들 완료 회차(Supabase), 본인 ID로 isMine 표시, 중복 제거
       const allCompleted = React.useMemo(() => {
+        // 사용자는 한 회차를 한 번만 완주하므로 (이름·닉네임·회차)로 식별.
+        // completedAt을 키에서 빼서, 같은 회차가 중복 행으로 들어와도 하나로 합쳐진다.
         const myKey = (e) =>
-          `${e.name || ''}|${e.nickname || ''}|${e.roundNumber || 0}|${e.completedAt || 0}`;
+          `${e.name || ''}|${e.nickname || ''}|${e.roundNumber || 0}`;
         const seen = new Set();
         const out = [];
 
