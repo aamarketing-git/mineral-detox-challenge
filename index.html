@@ -584,6 +584,45 @@
     const HomeIcon    = (p) => <Svg {...p}><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></Svg>;
     const BookOpen    = (p) => <Svg {...p}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></Svg>;
     const XIcon       = (p) => <Svg {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></Svg>;
+    const Share2      = (p) => <Svg {...p}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></Svg>;
+    const Gift        = (p) => <Svg {...p}><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5A4.8 8 0 0 1 12 8a4.8 8 0 0 1 4.5-5 2.5 2.5 0 0 1 0 5"/></Svg>;
+
+    /* ========== 공유 유틸 (Web Share API + 클립보드 폴백) ========== */
+    // navigator.share가 있으면 OS 공유 시트, 없으면 클립보드 복사로 폴백.
+    // onToast(msg)로 결과를 사용자에게 알린다.
+    const shareContent = async ({ title, text, url }, onToast) => {
+      const shareUrl = url || window.location.href;
+      try {
+        if (navigator.share) {
+          await navigator.share({ title, text, url: shareUrl });
+          return;
+        }
+      } catch (e) {
+        // 사용자가 공유 시트를 취소한 경우 → 아무 것도 하지 않음
+        if (e && e.name === 'AbortError') return;
+      }
+      // 폴백: 클립보드 복사
+      const payload = `${text ? text + '\n' : ''}${shareUrl}`;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(payload);
+          onToast && onToast('링크를 복사했어요. 붙여넣기 해서 공유해보세요!');
+          return;
+        }
+      } catch (e) { /* fall through */ }
+      // 클립보드도 막힌 환경 → 임시 textarea로 복사 시도
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = payload;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        onToast && onToast('링크를 복사했어요. 붙여넣기 해서 공유해보세요!');
+      } catch (e) {
+        onToast && onToast('공유 링크: ' + shareUrl);
+      }
+    };
 
     /* ========== Helpers ========== */
     const maskName = (name) => {
@@ -869,7 +908,7 @@
       );
     };
 
-    const ReviewModal = ({ data, onClose }) => {
+    const ReviewModal = ({ data, onClose, onShare }) => {
       const condRows = CONDITION_DEFS.filter(def => data.conditions && data.conditions[def.key]);
       return (
         <div className="fixed inset-0 z-50 flex items-end justify-center"
@@ -943,6 +982,14 @@
                 </div>
                 <div className="text-sm leading-relaxed" style={{ color: C.text }}>{data.review}</div>
               </div>
+              {data.isMine && onShare && (
+                <button type="button" onClick={() => onShare(data)}
+                  className="w-full font-semibold transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-2"
+                  style={{ background: C.blue, color: '#fff', height: 52, borderRadius: 14, fontSize: 16 }}>
+                  <Share2 size={18} color="#fff" />
+                  내 결과 공유하기
+                </button>
+              )}
               <button type="button" onClick={onClose}
                 className="w-full font-semibold transition-all active:scale-[0.98]"
                 style={{ background: C.bg, color: C.text, height: 52, borderRadius: 14, fontSize: 16 }}>
@@ -1035,7 +1082,7 @@
 
     /* ========== Screens (defined at module scope so input focus is preserved) ========== */
 
-    const HomeScreen = ({ setScreen, setOnboardStep, setCommunityTab, setSelectedReview, allCompleted, user, checks, roundNumber, logout, myHistory, displayActive, liveCount, isLive, dbStatus, dbError, clearDbError, installPrompt, triggerInstall, isStandalone, isIOS, onGuide, onEditProfile, onEditRun }) => {
+    const HomeScreen = ({ setScreen, setOnboardStep, setCommunityTab, setSelectedReview, allCompleted, user, checks, roundNumber, logout, myHistory, displayActive, liveCount, isLive, dbStatus, dbError, clearDbError, installPrompt, triggerInstall, isStandalone, isIOS, onGuide, onEditProfile, onEditRun, onInvite }) => {
       const hasActive = (checks || []).some(Boolean);
       const isLoggedIn = !!(user && user.name);
       const completedNow = (checks || []).filter(Boolean).length;
@@ -1141,6 +1188,21 @@
               </div>
             </div>
           )}
+
+          {/* 친구 초대 / 링크 공유 */}
+          <button type="button" onClick={onInvite}
+            className="w-full flex items-center gap-3 mb-3 transition-all active:scale-[0.98]"
+            style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: '16px 18px' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: C.blueSoft }}>
+              <Gift size={20} color={C.blue} />
+            </div>
+            <div className="flex-1 text-left">
+              <div className="text-sm font-bold" style={{ color: C.text }}>친구 초대하기</div>
+              <div className="text-xs mt-0.5" style={{ color: C.hint }}>링크를 공유하고 함께 도전해요</div>
+            </div>
+            <Share2 size={18} color={C.hint} />
+          </button>
 
           {/* 카테고리 빠른 이동 */}
           <div className="grid gap-2 mb-6"
@@ -1401,7 +1463,7 @@
       );
     };
 
-    const CommunityScreen = ({ setScreen, communityTab, setCommunityTab, selectedReview, setSelectedReview, allCompleted, myHistory, displayActive, isLive, onGuide, onEditRun }) => (
+    const CommunityScreen = ({ setScreen, communityTab, setCommunityTab, selectedReview, setSelectedReview, allCompleted, myHistory, displayActive, isLive, onGuide, onEditRun, onShareResult }) => (
       <Screen>
         <Header onBack={() => setScreen('home')} right="커뮤니티" />
         <div className="px-5 pb-28">
@@ -1409,7 +1471,7 @@
             {[
               { k: 'active', label: `진행 중 ${displayActive.length}` },
               { k: 'done',   label: `완료 ${allCompleted.length}` },
-              ...((myHistory && myHistory.length > 0) ? [{ k: 'mine', label: `내 기록 ${myHistory.length}` }] : []),
+              { k: 'mine',   label: `내 기록${(myHistory && myHistory.length) ? ' ' + myHistory.length : ''}` },
               { k: 'band',   label: '밴드방' },
             ].map(t => (
               <button type="button" key={t.k} onClick={() => setCommunityTab(t.k)}
@@ -1510,7 +1572,17 @@
                       </div>
                       <div className="text-xs mt-0.5" style={{ color: C.hint }}>{formatRelative(u.completedAt)} 완주</div>
                     </div>
-                    <ChevronLeft size={18} color={C.hint} style={{ transform: 'rotate(180deg)' }} />
+                    {u.isMine ? (
+                      <button type="button"
+                        onClick={(e) => { e.stopPropagation(); onEditRun && onEditRun(u); }}
+                        className="px-3 h-9 rounded-full flex items-center justify-center gap-1 transition-all active:scale-90"
+                        style={{ background: C.blueSoft, color: C.blue, fontSize: 13, fontWeight: 600 }}
+                        title="이 회차 수정">
+                        ✎ 수정
+                      </button>
+                    ) : (
+                      <ChevronLeft size={18} color={C.hint} style={{ transform: 'rotate(180deg)' }} />
+                    )}
                   </div>
                   <div className="flex items-center gap-2 mb-3">
                     <BeforeAfterBox label="시작" value={`${u.weight.before}kg`} />
@@ -1535,8 +1607,22 @@
 
           {communityTab === 'mine' && (
             <div>
+              {myHistory.length === 0 ? (
+                <Card>
+                  <div className="text-center py-4">
+                    <div className="text-sm font-semibold mb-1" style={{ color: C.text }}>
+                      아직 완주 기록이 없어요
+                    </div>
+                    <div className="text-xs leading-relaxed" style={{ color: C.hint }}>
+                      챌린지를 한 번 완주하면 이곳에 회차별 기록이 쌓이고,<br/>
+                      각 기록의 <span style={{ color: C.blue, fontWeight: 600 }}>✎ 수정</span> 버튼으로 언제든 고칠 수 있어요.
+                    </div>
+                  </div>
+                </Card>
+              ) : (
+              <>
               <div className="text-xs font-medium mb-3 px-1" style={{ color: C.hint }}>
-                {myHistory.length}번 완주하셨어요. 카드를 누르면 자세히 보기, 우측 ✎ 버튼으로 수정 가능
+                {myHistory.length}번 완주하셨어요. 카드를 누르면 자세히 보기, 우측 ✎ 수정 버튼으로 수정 가능
               </div>
               {myHistory.map((u) => {
                 const d = (u.weight.before - u.weight.after).toFixed(1);
@@ -1582,6 +1668,8 @@
                   </Card>
                 );
               })}
+              </>
+              )}
             </div>
           )}
 
@@ -1673,7 +1761,7 @@
         </div>
 
         {selectedReview && (
-          <ReviewModal data={selectedReview} onClose={() => setSelectedReview(null)} />
+          <ReviewModal data={selectedReview} onClose={() => setSelectedReview(null)} onShare={onShareResult} />
         )}
         <BottomTabBar active="community" onTab={(k) => setScreen(k)} onGuide={onGuide} />
       </Screen>
@@ -3350,6 +3438,37 @@
         setAfter(EMPTY_AFTER);
       };
 
+      /* ----- 공유 핸들러 ----- */
+      // 친구 초대 / 링크 공유
+      const handleInvite = () => {
+        shareContent({
+          title: '1박 2일 미네랄 디톡스 챌린지',
+          text: '오륜미네랄로 몸을 가볍게, 혈액을 깨끗하게, 정신은 맑게 ✨\n나랑 같이 1박 2일 디톡스 챌린지 해볼래요?',
+          url: window.location.origin + window.location.pathname,
+        }, (msg) => setToast({ message: msg }));
+      };
+      // 내 결과 공유
+      const handleShareResult = (entry) => {
+        const wDelta = (Number(entry.weight.before) - Number(entry.weight.after)).toFixed(1);
+        const lines = [
+          `💧 ${entry.roundNumber}회차 미네랄 디톡스 완주 결과`,
+          `체중 ${entry.weight.before}kg → ${entry.weight.after}kg` +
+            (wDelta > 0 ? ` (-${wDelta}kg)` : wDelta < 0 ? ` (+${Math.abs(wDelta)}kg)` : ''),
+        ];
+        if (entry.bodyFat) {
+          const bfd = (Number(entry.bodyFat.before) - Number(entry.bodyFat.after)).toFixed(1);
+          lines.push(`체지방 ${entry.bodyFat.before}% → ${entry.bodyFat.after}%` +
+            (bfd > 0 ? ` (-${bfd}%p)` : bfd < 0 ? ` (+${Math.abs(bfd)}%p)` : ''));
+        }
+        if (entry.review) lines.push(`"${entry.review}"`);
+        lines.push('나도 1박 2일 미네랄 디톡스 챌린지 도전하기 👇');
+        shareContent({
+          title: `${entry.roundNumber}회차 미네랄 디톡스 완주`,
+          text: lines.join('\n'),
+          url: window.location.origin + window.location.pathname,
+        }, (msg) => setToast({ message: msg }));
+      };
+
       /* ----- Toast (floating) ----- */
       const ToastBar = () => (
         toast ? (
@@ -3413,6 +3532,7 @@
             onGuide={() => setShowGuide(true)}
             onEditProfile={() => setScreen('profile-edit')}
             onEditRun={(entry) => { setEditingRun(entry); setScreen('run-edit'); }}
+            onInvite={handleInvite}
           />
         );
       } else if (screen === 'community') {
@@ -3429,6 +3549,7 @@
             isLive={db.ready && liveActive.length > 0}
             onGuide={() => setShowGuide(true)}
             onEditRun={(entry) => { setEditingRun(entry); setScreen('run-edit'); }}
+            onShareResult={handleShareResult}
           />
         );
       } else if (screen === 'login') {
